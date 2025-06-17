@@ -4,7 +4,9 @@
 #include <fdt.h>
 #include <libfdt.h>
 
-
+#define SUPPLY_SUFFIX "-supply"
+#define SUPPLY_SUFFIX_LEN strlen(SUPPLY_SUFFIX)
+#define HAS_SUPPLY_SUFFIX_LEN(x)  strcmp((strlen(x)-SUPPLY_SUFFIX_LEN)+x, SUPPLY_SUFFIX)
 
 const char *get_property_phandle_name(const void *fdt, const struct fdt_property *prop){
 	uint32_t phandle_be;
@@ -35,14 +37,26 @@ void process_node(const void *fdt, int nodeoffset) {
 			}
 			if (strcmp("vin-supply", prop_name)==0) {
 				const char *vin_supply_phandle_name = get_property_phandle_name(fdt, prop);
-				printf("\"%s\" -> \"%s\" [style=dashed, label=\"supply\"];\n", vin_supply_phandle_name, name);
+				printf("\"%s\" -> \"%s\" [style=bold, label=\"supply\"];\n", vin_supply_phandle_name, name);
 			}
 
 		}
 	} else {
 		const char *this_name =fdt_get_name(fdt, nodeoffset, &prop_len);
-		printf("# ignore %s\n", this_name);
-		
+//		printf("# ignore %s\n", this_name);
+		int prop_offset;
+		fdt_for_each_property_offset(prop_offset, fdt, nodeoffset) {
+			const struct fdt_property *prop = fdt_get_property_by_offset(fdt, prop_offset, NULL);
+			const char *prop_name = fdt_get_string(fdt, fdt32_to_cpu(prop->nameoff), NULL);
+//			printf("# ignore %s\n", prop_name);
+			if (HAS_SUPPLY_SUFFIX_LEN(prop_name)==0) {
+				const char *device_phandle_name = get_property_phandle_name(fdt, prop);
+				printf("\"%s\" [shape=ellipse, fillcolor=lightblue, style=filled];\n", this_name);
+				const char *phandle_name = get_property_phandle_name(fdt, prop);
+
+				printf("\"%s\" -> \"%s\" [style=bold, label=\"supplies\"];\n", phandle_name, this_name);
+			}
+		}
 	}
 }
 
