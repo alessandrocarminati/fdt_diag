@@ -1,3 +1,4 @@
+AC_CONFIG_MACRO_DIRS([m4])
 AC_INIT([fdt], [0.1], [alessandro.carminati@gmail.com])
 AM_INIT_AUTOMAKE([foreign])
 AC_PROG_CC
