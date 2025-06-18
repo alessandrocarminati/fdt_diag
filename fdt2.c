@@ -100,7 +100,13 @@ void process_node(const void *fdt, int nodeoffset) {
 
 void walk_nodes(const void *fdt, int parent_offset) {
 	int nodeoffset;
+	const char *model = fdt_getprop(fdt, 0, "model", NULL);
 
+	if (model) {
+		UNIQUE_PRINTF("labelloc=\"t\";\nlabel=\"%s\";\n", model);
+	} else {
+	    UNIQUE_PRINTF("labelloc=\"t\";\nlabel=\"Unknown\";\n");
+	}
 	fdt_for_each_subnode(nodeoffset, fdt, parent_offset) {
 		process_node(fdt, nodeoffset);
 		walk_nodes(fdt, nodeoffset);
