@@ -43,6 +43,8 @@ const char* HELP_BODY_STR =
 const char *HELP_HEADER = "digraph G {\n";
 const char *HELP_FOOTER = "}\n";
 
+const char *NICER = "ranksep=1.5;\nnodesep=0.1;\nsplines=true;\n";
+
 #define DEBUG
 
 #ifdef DEBUG
@@ -55,7 +57,7 @@ bool want_hint = false;
 
 char *sanitize(const char *input) {
 	static char map[96] = {
-		' ', '!', '\'', '#', '$', '%', '&', '\'', '(', ')', '*', '+', ',', '_', '.', '/',
+		' ', '!', '\'', '#', '$', '%', '&', '\'', '(', ')', '*', '+', '_', '_', '.', '/',
 		'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', ':', ';', '<', '=', '>', '?',
 		'_', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O',
 		'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', '[', '\\', ']', '^', '_',
@@ -81,6 +83,35 @@ char *sanitize(const char *input) {
 
 	PRINTDBG("# sanitize: done\n");
 	return output;
+}
+
+const char *is_regulator(const void *fdt, int nodeoffset) {
+	int prop_offset;
+
+	PRINTDBG("# is_regulator: start search for regulator-name\n");
+	const char *name = fdt_getprop(fdt, nodeoffset, "regulator-name", NULL);
+	if (name) {
+		PRINTDBG("# is_regulator: found '%s' using regulator-name\n", name);
+		return name;
+	}
+
+	PRINTDBG("# is_regulator: no luck, trying backup\n");
+	fdt_for_each_property_offset(prop_offset, fdt, nodeoffset) {
+		const struct fdt_property *prop = fdt_get_property_by_offset(fdt, prop_offset, NULL);
+		if (!prop)
+			continue;
+
+		const char *name = fdt_string(fdt, fdt32_to_cpu(prop->nameoff));
+		PRINTDBG("# is_regulator: Property %s\n", name);
+		size_t len = strlen(name);
+		if (len >= 11 && strncmp(name, "regulator-m", 11) == 0){
+			const char *tmp = fdt_get_name(fdt, nodeoffset, NULL);
+			PRINTDBG("# is_regulator: found! Return '%s'\n", tmp);
+			return tmp;
+		}
+	}
+	PRINTDBG("# is_regulator: No Luck :(\n");
+	return NULL;
 }
 
 const char *get_property_phandle_name(const void *fdt, const struct fdt_property *prop){
@@ -165,7 +196,12 @@ const char *find_upstream_source_seq(const void *fdt, int nodeoffset, int seqno)
 			return NULL;
 
 		PRINTDBG("# find_upstream_source_seq: iteration = %d - success\n", match_index);
-		const char *regname = fdt_getprop(fdt, ref_offset, "regulator-name", &len);
+		const char *regname = is_regulator(fdt, ref_offset);
+//fdt_getprop(fdt, ref_offset, "regulator-name", &len);
+//		if (!regname) {
+//			PRINTDBG("# find_upstream_source_seq: container has not regulator-name, \n", match_index);
+//			regname = fdt_get_name(fdt, nodeoffset, NULL);
+//		}
 		return regname;
 	}
 
@@ -257,6 +293,7 @@ void walk_nodes(const void *fdt) {
 
 	if (want_hint)
 		printf("%s", HELP_BODY_STR);
+	printf("%s", NICER);
 
 	model_s = sanitize(model);
 	if (model) {
@@ -316,7 +353,7 @@ int get_parent_device_offs(const void *fdt, int nodeoffset) {
 			return parent_offset;
 
 		PRINTDBG("# get_parent_device_offs: Rule 3: Heuristic - has multiple *-supply properties\n");
-		if (count_supply_properties(fdt, parent_offset) > 2)
+		if (count_supply_properties(fdt, parent_offset) > 0)
 			return parent_offset;
 
 		PRINTDBG("# get_parent_device_offs: Presence of reg property\n");
@@ -372,45 +409,36 @@ void process_node(const void *fdt, int nodeoffset, int depth, int seq, int reg_i
 		PRINTDBG("# process_node: current node: %s (offset: %d) depth=%d\n", path, nodeoffset, depth);
 		node_name = fdt_get_name(fdt, nodeoffset, NULL);
 
-		const char *regname = fdt_getprop(fdt, nodeoffset, "regulator-name", NULL);
+//		const char *regname = fdt_getprop(fdt, nodeoffset, "regulator-name", NULL);
+		const char *regname = is_regulator(fdt, nodeoffset);
 		if (regname) {
+			PRINTDBG("# process_node: regname=0x%08lx is a regulator\n", regname);
 			reg_in_branch = 1;
 			const char *comp = fdt_getprop(fdt, nodeoffset, "compatible", NULL);
 			if (!comp) {
 				if (depth>1) {
 					int parent_offs = get_parent_device_offs(fdt, nodeoffset);
-					const char *current_reg_name=fdt_get_name(fdt, nodeoffset, NULL);
-
-					new_name = malloc(strlen(current_reg_name)+16);
-					PRINTDBG("# process_node: newname @0x%08lx, current_reg_name='%s'(%d),  0x%08lx\n", (long)new_name, current_reg_name, (int)strlen(current_reg_name), (long)new_name+strlen(current_reg_name));
-					strcpy(new_name, node_name);
-					memcpy(new_name+strlen(current_reg_name), "-supply", 8);
-					const char *upstr_regulator = resolve_regulator_name(fdt, parent_offs, new_name);
 
 					const char *parent_name = fdt_get_name(fdt, parent_offs, NULL);
 					char *tmp = sanitize(parent_name);
 					PRINTDBG("# process_node: parent_name=0x%08lx, parent_offset=%d\n", (long)tmp, parent_offs);
+//					printf("subgraph cluster_%s {\nstyle=filled;\ncolor=lightgrey;\nlabel = \"%s\";\n", tmp, parent_name);
 					printf("subgraph cluster_%s {\nstyle=filled;\ncolor=lightgrey;\nlabel = \"%s\";\n", tmp, parent_name);
+					printf("\"%s:Input\" [shape=diamond, fillcolor=lightgreen, style=filled];\n", parent_name);
 					printf("\"%s\" [shape=box, fillcolor=lightgreen, style=filled];\n", regname);
 					printf("}\n");
 					MD5((const unsigned char*)parent_name, strlen(parent_name), digest);
 					if (!is_md5_seen(digest)) {
 						add_md5(digest);
 					}
+					int i =0;
+					const char *source;
+					while (source=find_upstream_source_seq(fdt, parent_offs, i++)) {
+//						UNIQUE_PRINTF("\"%s\" -> \"%s\" [style=bold, label=\"supply\"];\n", source, regname);
+						UNIQUE_PRINTF("\"%s\" -> \"%s:Input\" [style=bold, label=\"supply\"];\n", source, parent_name, parent_name);
+					}
 					free(tmp);
-					if (!upstr_regulator) {
-						PRINTDBG("# process_node: no direct mapping, try backup strategy\n");
-						upstr_regulator = find_upstream_source(fdt, parent_offs);
-						if (!upstr_regulator) {
-							PRINTDBG("# process_node: Last resort, try backup-backup strategy\n");
-							upstr_regulator = find_upstream_source_seq(fdt, parent_offs, seq++);
-						}
-					} else {
-						seq=0;
-					}
-					if (upstr_regulator) {
-						printf("\"%s\" -> \"%s\" [style=bold, label=\"supply\"];\n", upstr_regulator, regname);
-					}
+
 				}
 			} else {
 				printf("\"%s\" [shape=%s, fillcolor=lightblue, style=filled];\n", regname, shape(comp));
@@ -441,9 +469,10 @@ void process_node(const void *fdt, int nodeoffset, int depth, int seq, int reg_i
 				free(tmp);
 				int i =0;
 				const char *source;
-				while (source=find_upstream_source_seq(fdt, nodeoffset, i++)) {
-					printf("\"%s\" -> \"%s\" [style=bold, label=\"supply\"];\n", source, node_name);
-			}
+				while (source = find_upstream_source_seq(fdt, nodeoffset, i++)) {
+					PRINTDBG("# process_node: emitting arch: %s -> %s\n", source, node_name);
+					UNIQUE_PRINTF("\"%s\" -> \"%s\" [style=bold, label=\"supply\"];\n", source, node_name);
+				}
 			}
 		}
 
