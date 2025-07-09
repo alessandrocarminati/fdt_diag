@@ -1,2 +1,15 @@
 build/
 autom4te.cache/
+Makefile
+config.h
+config.log
+config.status
+libtool
+src/.deps/
+src/Makefile
+src/fdt
+src/*.o
+stamp-h1
+Makefile.in
+Makefile.in
+src/Makefile.in

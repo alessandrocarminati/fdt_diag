@@ -5,47 +5,84 @@
 #include <stdarg.h>
 #include <libfdt.h>
 #include <openssl/md5.h>
+#include "unique_printf.h"
 
-#define PRINTF_BUFFER_MD5_POS 1024
+#define UNUSED(x) (void)(x)
 #define SUPPLY_SUFFIX "-supply"
 #define SUPPLY_SUFFIX_LEN strlen(SUPPLY_SUFFIX)
 #define HAS_SUPPLY_SUFFIX_LEN(x)  strcmp((strlen(x)-SUPPLY_SUFFIX_LEN)+x, SUPPLY_SUFFIX)
-#define UNIQUE_PRINTF(...) unique_printf_impl(__VA_ARGS__)
-static unsigned char seen_hashes[PRINTF_BUFFER_MD5_POS][MD5_DIGEST_LENGTH];
-static int seen_count = 0;
 
+#define HELP_CMD_STR "Usage: %s <dtb file> (-hint)\n\t-h (--help)\tregulator shapes chart.\n\t-hint\t\tadds a legend for symbols shapes.\n"
 
-int is_md5_seen(const unsigned char* md5) {
-	for (int i = 0; i < seen_count; ++i) {
-		if (memcmp(seen_hashes[i], md5, MD5_DIGEST_LENGTH) == 0)
-			return 1;
+#define ENTRY(type, shape) "\"" type "\" [shape=" shape ", fillcolor=lightblue, style=filled];\n"
+
+#define SHAPE_CASES \
+    ENTRY("regulator-fixed", "ellipse") \
+    ENTRY("regulator-gpio", "box") \
+    ENTRY("pwm-regulator", "octagon")
+
+#define shape(x) ( \
+    !strcmp(x, "regulator-fixed") ? "ellipse" : \
+    !strcmp(x, "regulator-gpio") ? "box" : \
+    !strcmp(x, "pwm-regulator") ? "octagon" : \
+    "hexagon" \
+)
+
+const char* HELP_BODY_STR =
+    "subgraph cluster_hint {\n"
+    "\"User Device\" [shape=box, fillcolor=orange, style=filled];\n"
+    "\"in-Device Regulator\" [shape=box, fillcolor=lightgreen, style=filled];\n"
+    SHAPE_CASES
+    "\"other type regulator\" [shape=hexagon, fillcolor=lightblue, style=filled];\n"
+    "style=filled;\n"
+    "color=cyan;\n"
+    "label = \"Hints\";\n"
+    "}\n"
+    ;
+
+const char *HELP_HEADER = "digraph G {\n";
+const char *HELP_FOOTER = "}\n";
+
+#define DEBUG
+
+#ifdef DEBUG
+#define PRINTDBG(...) printf(__VA_ARGS__)
+#else
+#define PRINTDBG(...)
+#endif
+
+bool want_hint = false;
+
+char *sanitize(const char *input) {
+	static char map[96] = {
+		' ', '!', '\'', '#', '$', '%', '&', '\'', '(', ')', '*', '+', ',', '_', '.', '/',
+		'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', ':', ';', '<', '=', '>', '?',
+		'_', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O',
+		'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', '[', '\\', ']', '^', '_',
+		'`', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o',
+		'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z', '{', '|', '}', '~', '_'
+		};
+
+	PRINTDBG("# sanitize: input='%s'\n", input);
+	if (!input) return NULL;
+
+	char *output = strdup(input);
+	if (!output) return NULL;
+	PRINTDBG("# sanitize: duplicated newptr=0x%08lx\n", (long)output);
+
+	for (char *p = output; *p; ++p) {
+		unsigned char c = (unsigned char)*p;
+		if (c < 32 || c > 127) {
+			*p = '_';
+		} else {
+			*p = map[c - 32];
+		}
 	}
-	return 0;
+
+	PRINTDBG("# sanitize: done\n");
+	return output;
 }
 
-void add_md5(const unsigned char* md5) {
-	if (seen_count < PRINTF_BUFFER_MD5_POS) {
-		memcpy(seen_hashes[seen_count], md5, MD5_DIGEST_LENGTH);
-		seen_count++;
-	}
-}
-
-int unique_printf_impl(const char *format, ...) {
-	char buffer[4096];
-	va_list args;
-	va_start(args, format);
-	vsnprintf(buffer, sizeof(buffer), format, args);
-	va_end(args);
-
-	unsigned char digest[MD5_DIGEST_LENGTH];
-	MD5((const unsigned char*)buffer, strlen(buffer), digest);
-
-	if (!is_md5_seen(digest)) {
-		add_md5(digest);
-		return printf("%s", buffer);
-	}
-	return 0;
-}
 const char *get_property_phandle_name(const void *fdt, const struct fdt_property *prop){
 	uint32_t phandle_be;
 	memcpy(&phandle_be, prop->data, sizeof(uint32_t));
@@ -54,71 +91,380 @@ const char *get_property_phandle_name(const void *fdt, const struct fdt_property
 	const char *phandle_name = fdt_get_name(fdt, phandle_offset, NULL);
 	return phandle_name;
 }
-
-void process_node(const void *fdt, int nodeoffset) {
-	const char *name = fdt_get_name(fdt, nodeoffset, NULL);
-	int prop_len;
-
-
-	const char *reg_name = fdt_getprop(fdt, nodeoffset, "regulator-name", &prop_len);
-	if (reg_name && prop_len > 0) {
-		UNIQUE_PRINTF("\"%s\" [label=\"%s\", shape=box, fillcolor=lightgrey, style=filled];\n", name, reg_name);
-
-		int prop_offset;
-		fdt_for_each_property_offset(prop_offset, fdt, nodeoffset) {
-			const struct fdt_property *prop = fdt_get_property_by_offset(fdt, prop_offset, NULL);
-			const char *prop_name = fdt_get_string(fdt, fdt32_to_cpu(prop->nameoff), NULL);
-
-			if (strcmp("regulator-coupled-with", prop_name)==0) {
-				const char *coupled_phandle_name = get_property_phandle_name(fdt, prop);
-				UNIQUE_PRINTF("\"%s\" -> \"%s\" [style=dashed, label=\"coupled\"];\n", coupled_phandle_name, name);
-			}
-			if (strcmp("vin-supply", prop_name)==0) {
-				const char *vin_supply_phandle_name = get_property_phandle_name(fdt, prop);
-				UNIQUE_PRINTF("\"%s\" -> \"%s\" [style=bold, label=\"supply\"];\n", vin_supply_phandle_name, name);
-			}
-
-		}
-	} else {
-		const char *this_name =fdt_get_name(fdt, nodeoffset, &prop_len);
-//		printf("# ignore %s\n", this_name);
-		int prop_offset;
-		fdt_for_each_property_offset(prop_offset, fdt, nodeoffset) {
-			const struct fdt_property *prop = fdt_get_property_by_offset(fdt, prop_offset, NULL);
-			const char *prop_name = fdt_get_string(fdt, fdt32_to_cpu(prop->nameoff), NULL);
-//			printf("# ignore %s\n", prop_name);
-			if (HAS_SUPPLY_SUFFIX_LEN(prop_name)==0) {
-				const char *device_phandle_name = get_property_phandle_name(fdt, prop);
-				UNIQUE_PRINTF("\"%s\" [shape=ellipse, fillcolor=lightblue, style=filled];\n", this_name);
-				const char *phandle_name = get_property_phandle_name(fdt, prop);
-
-				UNIQUE_PRINTF("\"%s\" -> \"%s\" [style=bold, label=\"supplies\"];\n", phandle_name, this_name);
-			}
-		}
-	}
+const char *get_property_phandle_reg_name(const void *fdt, const struct fdt_property *prop){
+	uint32_t phandle_be;
+	memcpy(&phandle_be, prop->data, sizeof(uint32_t));
+	uint32_t phandle = fdt32_to_cpu(phandle_be);
+	int phandle_offset = fdt_node_offset_by_phandle(fdt, phandle);
+	const char *regname = fdt_getprop(fdt, phandle_offset, "regulator-name", NULL);
+	return regname;
 }
 
-void walk_nodes(const void *fdt, int parent_offset) {
-	int nodeoffset;
+char *remove_suffix(const char *c) {
+	const char *suffix = "-supply";
+	size_t suffix_len = strlen(suffix);
+
+	if (!c) {
+		return NULL;
+	}
+
+	size_t len = strlen(c);
+
+	if (len >= suffix_len && strcmp(c + len - suffix_len, suffix) == 0) {
+		char *result = (char *)malloc(len - suffix_len + 1);
+		if (!result) {
+			return NULL;
+		}
+		strncpy(result, c, len - suffix_len);
+		result[len - suffix_len] = '\0';
+		return result;
+	}
+
+	return NULL;
+}
+
+const char *find_upstream_source_seq(const void *fdt, int nodeoffset, int seqno) {
+	int prop_offset;
+	int len;
+	const struct fdt_property *prop;
+	int match_index = 0;
+
+	PRINTDBG("# find_upstream_source_seq: l4=%d\n", seqno);
+	fdt_for_each_property_offset(prop_offset, fdt, nodeoffset) {
+		PRINTDBG("# find_upstream_source_seq: iteration = %d\n", match_index);
+		prop = fdt_get_property_by_offset(fdt, prop_offset, &len);
+		if (!prop)
+			continue;
+
+		PRINTDBG("# find_upstream_source_seq: iteration = %d checkpoint 1\n", match_index);
+		const char *name = fdt_string(fdt, fdt32_to_cpu(prop->nameoff));
+		if (!name)
+			continue;
+
+		PRINTDBG("# find_upstream_source_seq: iteration = %d checkpoint 2 (%s)\n", match_index, name);
+		size_t name_len = strlen(name);
+		if (name_len < 7 || strcmp(name + name_len - 7, "-supply") != 0)
+			continue;
+
+		PRINTDBG("# find_upstream_source_seq: iteration = %d checkpoint 3\n", match_index);
+		if (match_index++ != seqno)
+			continue;
+
+		PRINTDBG("# find_upstream_source_seq: iteration = %d checkpoint 4\n", match_index);
+		if (len < sizeof(fdt32_t))
+			return NULL;
+
+		PRINTDBG("# find_upstream_source_seq: iteration = %d checkpoint 5\n", match_index);
+		int phandle = fdt32_to_cpu(*(const fdt32_t *)prop->data);
+		if (!phandle)
+			return NULL;
+
+		PRINTDBG("# find_upstream_source_seq: iteration = %d checkpoint 6\n", match_index);
+		int ref_offset = fdt_node_offset_by_phandle(fdt, phandle);
+		if (ref_offset < 0)
+			return NULL;
+
+		PRINTDBG("# find_upstream_source_seq: iteration = %d - success\n", match_index);
+		const char *regname = fdt_getprop(fdt, ref_offset, "regulator-name", &len);
+		return regname;
+	}
+
+	return NULL;
+}
+const char *find_upstream_source(const void *fdt, int nodeoffset) {
+	int prop_offset;
+	int phandle = -1;
+	int len;
+	const struct fdt_property *prop;
+
+	PRINTDBG("# find_upstream_source:start\n");
+	fdt_for_each_property_offset(prop_offset, fdt, nodeoffset) {
+		PRINTDBG("# find_upstream_source: iteration start\n");
+		prop = fdt_get_property_by_offset(fdt, prop_offset, &len);
+		if (!prop)
+			continue;
+
+		const char *name = fdt_string(fdt, fdt32_to_cpu(prop->nameoff));
+		if (!name)
+			continue;
+		PRINTDBG("# find_upstream_source: property %s\n", name);
+		size_t name_len = strlen(name);
+		if (name_len < 7 || strcmp(name + name_len - 7, "-supply") != 0)
+			continue;
+
+		PRINTDBG("# find_upstream_source: property %s is a supply\n", name);
+
+		if (len < sizeof(fdt32_t))
+			continue;
+
+		int current_phandle = fdt32_to_cpu(*(const fdt32_t *)prop->data);
+		if (current_phandle == 0)
+			continue;
+
+		PRINTDBG("# find_upstream_source: property %s is referring to %d\n", name, phandle);
+		if (phandle == -1) {
+			phandle = current_phandle;
+		} else if (phandle != current_phandle) {
+			PRINTDBG("# find_upstream_source: pHANDLE MISMATCH\n");
+			return NULL;
+		}
+	}
+
+	if (phandle == -1)
+		return NULL;
+
+	int target_offset = fdt_node_offset_by_phandle(fdt, phandle);
+	if (target_offset < 0)
+		return NULL;
+
+	const char *regname = fdt_getprop(fdt, target_offset, "regulator-name", &len);
+	return regname ? regname : NULL;
+}
+
+int next_supply_property_offset(const void *fdt, int nodeoffset, int last_offset) {
+	int prop_offset;
+
+	fdt_for_each_property_offset(prop_offset, fdt, nodeoffset) {
+		if (prop_offset <= last_offset)
+			continue;
+
+		const struct fdt_property *prop = fdt_get_property_by_offset(fdt, prop_offset, NULL);
+		if (!prop)
+			continue;
+
+		const char *name = fdt_string(fdt, fdt32_to_cpu(prop->nameoff));
+		size_t len = strlen(name);
+
+		if (len >= 7 && strcmp(name + len - 7, "-supply") == 0) {
+			return prop_offset;
+		}
+	}
+
+	return -1;
+}
+
+void process_node(const void *fdt, int nodeoffset, int depth, int seq, int reg_in_branch);
+
+void walk_nodes(const void *fdt) {
+	char *model_s;
 	const char *model = fdt_getprop(fdt, 0, "model", NULL);
 
+	int root = fdt_path_offset(fdt, "/");
+	if (root < 0) {
+		fprintf(stderr, "Can't find root node.\n");
+		return;
+	}
+
+	if (want_hint)
+		printf("%s", HELP_BODY_STR);
+
+	model_s = sanitize(model);
 	if (model) {
-		UNIQUE_PRINTF("labelloc=\"t\";\nlabel=\"%s\";\n", model);
+			printf("labelloc=\"t\";\nlabel=\"%s\";\n", model_s);
 	} else {
-	    UNIQUE_PRINTF("labelloc=\"t\";\nlabel=\"Unknown\";\n");
+			printf("labelloc=\"t\";\nlabel=\"Unknown\";\n");
 	}
-	fdt_for_each_subnode(nodeoffset, fdt, parent_offset) {
-		process_node(fdt, nodeoffset);
-		walk_nodes(fdt, nodeoffset);
+	free(model_s);
+
+	process_node(fdt, root, 0, 0, 0);
+}
+
+int resolve_phandle_from_property(const void *fdt, int nodeoffset, const char *propname) {
+	int len;
+	const fdt32_t *phandle_ptr = fdt_getprop(fdt, nodeoffset, propname, &len);
+
+	if (!phandle_ptr || len < sizeof(fdt32_t)) {
+		return -1;
 	}
+
+	uint32_t phandle = fdt32_to_cpu(*phandle_ptr);
+	int target_offset = fdt_node_offset_by_phandle(fdt, phandle);
+
+	return target_offset;
+}
+
+static int count_supply_properties(const void *fdt, int nodeoffset) {
+	int count = 0;
+	int prop_offset;
+
+	fdt_for_each_property_offset(prop_offset, fdt, nodeoffset) {
+		const struct fdt_property *prop = fdt_get_property_by_offset(fdt, prop_offset, NULL);
+		if (!prop)
+			continue;
+
+		const char *name = fdt_string(fdt, fdt32_to_cpu(prop->nameoff));
+		size_t len = strlen(name);
+		if (len >= 7 && strcmp(name + len - 7, "-supply") == 0)
+			count++;
+	}
+
+	return count;
+}
+
+int get_parent_device_offs(const void *fdt, int nodeoffset) {
+	int parent_offset = fdt_parent_offset(fdt, nodeoffset);
+
+	PRINTDBG("# get_parent_device_offs: start\n");
+	for (int i = 0; i < 2 && parent_offset >= 0; ++i) {
+		PRINTDBG("# get_parent_device_offs: Rule 1: Check for system-power-controller\n");
+		if (fdt_get_property(fdt, parent_offset, "system-power-controller", NULL))
+			return parent_offset;
+
+		PRINTDBG("# get_parent_device_offs: Rule 2: Node name starts with pmic@\n");
+		const char *name = fdt_get_name(fdt, parent_offset, NULL);
+		if (name && strncmp(name, "pmic@", 5) == 0)
+			return parent_offset;
+
+		PRINTDBG("# get_parent_device_offs: Rule 3: Heuristic - has multiple *-supply properties\n");
+		if (count_supply_properties(fdt, parent_offset) > 2)
+			return parent_offset;
+
+		PRINTDBG("# get_parent_device_offs: Presence of reg property\n");
+		if (fdt_get_property(fdt, parent_offset, "reg", NULL))
+			return parent_offset;
+
+		PRINTDBG("# get_parent_device_offs: Climb up the tree\n");
+		parent_offset = fdt_parent_offset(fdt, parent_offset);
+	}
+
+	PRINTDBG("# get_parent_device_offs: No Luck!\n");
+	return -1;
+}
+
+const char *resolve_regulator_name(const void *fdt, int nodeoffset, const char *propname) {
+	int len;
+
+	PRINTDBG("# resolve_regulator_name: l4=%s\n", propname);
+	const fdt32_t *phandle_ptr = fdt_getprop(fdt, nodeoffset, propname, &len);
+	if (!phandle_ptr || len < sizeof(fdt32_t)) {
+		PRINTDBG("# resolve_regulator_name: ERROR -> %s not found!\n", propname);
+		return NULL;
+	}
+
+	uint32_t phandle = fdt32_to_cpu(*phandle_ptr);
+
+	int target_offset = fdt_node_offset_by_phandle(fdt, phandle);
+	if (target_offset < 0) {
+		PRINTDBG("# resolve_regulator_name: ERROR -> cant solve phandle\n");
+		return NULL;
+	}
+
+	const char *reg_name = fdt_getprop(fdt, target_offset, "regulator-name", NULL);
+	return reg_name;
+}
+
+void process_node(const void *fdt, int nodeoffset, int depth, int seq, int reg_in_branch) {
+	char path[256];
+	int prop_offset;
+	char *new_name;
+	const struct fdt_property *node;
+	const char *node_name;
+	unsigned char digest[MD5_DIGEST_LENGTH];
+
+	// explore first
+	int child;
+	fdt_for_each_subnode(child, fdt, nodeoffset) {
+		process_node(fdt, child, depth + 1, seq, reg_in_branch);
+	}
+
+	if (!reg_in_branch) {
+		fdt_get_path(fdt, nodeoffset, path, sizeof(path));
+		PRINTDBG("# process_node: current node: %s (offset: %d) depth=%d\n", path, nodeoffset, depth);
+		node_name = fdt_get_name(fdt, nodeoffset, NULL);
+
+		const char *regname = fdt_getprop(fdt, nodeoffset, "regulator-name", NULL);
+		if (regname) {
+			reg_in_branch = 1;
+			const char *comp = fdt_getprop(fdt, nodeoffset, "compatible", NULL);
+			if (!comp) {
+				if (depth>1) {
+					int parent_offs = get_parent_device_offs(fdt, nodeoffset);
+					const char *current_reg_name=fdt_get_name(fdt, nodeoffset, NULL);
+
+					new_name = malloc(strlen(current_reg_name)+16);
+					PRINTDBG("# process_node: newname @0x%08lx, current_reg_name='%s'(%d),  0x%08lx\n", (long)new_name, current_reg_name, (int)strlen(current_reg_name), (long)new_name+strlen(current_reg_name));
+					strcpy(new_name, node_name);
+					memcpy(new_name+strlen(current_reg_name), "-supply", 8);
+					const char *upstr_regulator = resolve_regulator_name(fdt, parent_offs, new_name);
+
+					const char *parent_name = fdt_get_name(fdt, parent_offs, NULL);
+					char *tmp = sanitize(parent_name);
+					PRINTDBG("# process_node: parent_name=0x%08lx, parent_offset=%d\n", (long)tmp, parent_offs);
+					printf("subgraph cluster_%s {\nstyle=filled;\ncolor=lightgrey;\nlabel = \"%s\";\n", tmp, parent_name);
+					printf("\"%s\" [shape=box, fillcolor=lightgreen, style=filled];\n", regname);
+					printf("}\n");
+					MD5((const unsigned char*)parent_name, strlen(parent_name), digest);
+					if (!is_md5_seen(digest)) {
+						add_md5(digest);
+					}
+					free(tmp);
+					if (!upstr_regulator) {
+						PRINTDBG("# process_node: no direct mapping, try backup strategy\n");
+						upstr_regulator = find_upstream_source(fdt, parent_offs);
+						if (!upstr_regulator) {
+							PRINTDBG("# process_node: Last resort, try backup-backup strategy\n");
+							upstr_regulator = find_upstream_source_seq(fdt, parent_offs, seq++);
+						}
+					} else {
+						seq=0;
+					}
+					if (upstr_regulator) {
+						printf("\"%s\" -> \"%s\" [style=bold, label=\"supply\"];\n", upstr_regulator, regname);
+					}
+				}
+			} else {
+				printf("\"%s\" [shape=%s, fillcolor=lightblue, style=filled];\n", regname, shape(comp));
+			}
+			prop_offset = -1;
+			while ((prop_offset = next_supply_property_offset(fdt, nodeoffset, prop_offset)) != -1) {
+				char *s;
+				const struct fdt_property *prop = fdt_get_property_by_offset(fdt, prop_offset, NULL);
+				const char *name = fdt_string(fdt, fdt32_to_cpu(prop->nameoff));
+				PRINTDBG("# process_node: Found supply: %s (offset %d)\n", name, prop_offset);
+				const char *ref = get_property_phandle_reg_name(fdt, prop);
+
+				PRINTDBG("# process_node: %s points to node: %s\n", name, ref);
+
+				printf("\"%s\" -> \"%s\" [style=bold, label=\"supply\"];\n", ref, regname);
+			}
+		return;
+		}
+		PRINTDBG("# process_node: check if current is a device using a regulator\n");
+		if (count_supply_properties(fdt, nodeoffset) > 0) {
+			PRINTDBG("# process_node: %s: current is a device using a regulator, count_supply_properties = %d\n", node_name, count_supply_properties(fdt, nodeoffset));
+			MD5((const unsigned char*)node_name, strlen(node_name), digest);
+			if (!is_md5_seen(digest)) {
+				char *tmp = sanitize(node_name);
+				printf("subgraph cluster_%s {\nstyle=filled;\ncolor=lightgrey;\nlabel = \"%s\";\n", tmp, node_name);
+				printf("\"%s\" [shape=box, fillcolor=orange, style=filled];\n", node_name);
+				printf("}\n");
+				free(tmp);
+				int i =0;
+				const char *source;
+				while (source=find_upstream_source_seq(fdt, nodeoffset, i++)) {
+					printf("\"%s\" -> \"%s\" [style=bold, label=\"supply\"];\n", source, node_name);
+			}
+			}
+		}
+
+	} // !reg_in_branch
 }
 
 int main(int argc, char *argv[]) {
-	if (argc < 2) {
-		fprintf(stderr, "Usage: %s <dtb file>\n", argv[0]);
+	if ( (argc != 2) && (argc != 3) ) {
+		fprintf(stderr, HELP_CMD_STR, argv[0]);
 		return 1;
 	}
+	if ( (argc == 3) && (strcmp(argv[2], "-hint") != 0) ) {
+		fprintf(stderr, HELP_CMD_STR, argv[0]);
+		return 1;
+	}
+	if (argc == 3) want_hint = true;
 
+	if ((strcmp(argv[1],"-h") == 0)||(strcmp(argv[1],"--help") == 0)) {
+		printf("%s%s%s", HELP_HEADER, HELP_BODY_STR, HELP_FOOTER);
+		return 0;
+	}
 	FILE *f = fopen(argv[1], "rb");
 	if (!f) {
 		perror("File open failed");
@@ -130,7 +476,8 @@ int main(int argc, char *argv[]) {
 	rewind(f);
 
 	void *fdt = malloc(size);
-	fread(fdt, 1, size, f);
+	size_t result = fread(fdt, 1, size, f);
+	UNUSED(result);
 	fclose(f);
 
 	if (fdt_check_header(fdt)) {
@@ -140,8 +487,9 @@ int main(int argc, char *argv[]) {
 	}
 
 	printf("digraph regulators {\n");
-	walk_nodes(fdt, 0);
+	walk_nodes(fdt);
 	printf("}\n");
 	free(fdt);
 	return 0;
 }
+
