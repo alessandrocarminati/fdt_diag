@@ -13,5 +13,5 @@ for i in $(ls dtbs/* | sort); do
         fi
     fi
     echo "$i"
-    ./src/fdt "$i" | xdot -
+    ./src/fdt "$i" -hint | xdot -
 done
