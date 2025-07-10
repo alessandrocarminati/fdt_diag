@@ -413,7 +413,7 @@ void process_node(const void *fdt, int nodeoffset, int depth, int seq, int reg_i
 //		const char *regname = fdt_getprop(fdt, nodeoffset, "regulator-name", NULL);
 		const char *regname = is_regulator(fdt, nodeoffset);
 		if (regname) {
-			PRINTDBG("# process_node: regname=0x%08lx is a regulator\n", regname);
+			PRINTDBG("# process_node: regname=0x%08lx is a regulator\n", (long)regname);
 			reg_in_branch = 1;
 			const char *comp = fdt_getprop(fdt, nodeoffset, "compatible", NULL);
 			if (!comp) {
