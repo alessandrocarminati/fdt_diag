@@ -340,6 +340,7 @@ static int count_supply_properties(const void *fdt, int nodeoffset) {
 
 int get_parent_device_offs(const void *fdt, int nodeoffset) {
 	int parent_offset = fdt_parent_offset(fdt, nodeoffset);
+	int last_resort_offs = parent_offset;
 
 	PRINTDBG("# get_parent_device_offs: start\n");
 	for (int i = 0; i < 2 && parent_offset >= 0; ++i) {
@@ -364,8 +365,8 @@ int get_parent_device_offs(const void *fdt, int nodeoffset) {
 		parent_offset = fdt_parent_offset(fdt, parent_offset);
 	}
 
-	PRINTDBG("# get_parent_device_offs: No Luck!\n");
-	return -1;
+	PRINTDBG("# get_parent_device_offs: No Luck! just return the first parent offset.\n");
+	return last_resort_offs;
 }
 
 const char *resolve_regulator_name(const void *fdt, int nodeoffset, const char *propname) {
